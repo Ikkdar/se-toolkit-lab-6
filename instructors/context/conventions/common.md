@@ -167,18 +167,23 @@ Use GitHub-flavored Markdown alerts:
   1. Step text.
 
      > 🟦 **Note**
+     >
      > Note text.
 
      > 🟩 **Tip**
+     >
      > Tip text.
 
      > 🟪 **Important**
+     >
      > Important text.
 
      > 🟨 **Warning**
+     >
      > Warning text.
 
      > 🟥 **Caution**
+     >
      > Caution text.
   ```
 
