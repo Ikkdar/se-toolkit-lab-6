@@ -146,7 +146,9 @@ def list_files(path: str) -> str:
         return f"Error listing directory: {e}"
 
 
-def query_api(method: str, path: str, body: str = None) -> str:
+def query_api(
+    method: str, path: str, body: str = None, include_auth: bool = True
+) -> str:
     """
     Call the deployed backend API.
 
@@ -154,6 +156,7 @@ def query_api(method: str, path: str, body: str = None) -> str:
         method: HTTP method (GET, POST, etc.)
         path: API endpoint path (e.g., '/items/')
         body: JSON request body for POST/PUT (optional)
+        include_auth: Whether to include LMS_API_KEY in Authorization header (default: True)
 
     Returns:
         JSON string with status_code and body, or error message
@@ -169,18 +172,21 @@ def query_api(method: str, path: str, body: str = None) -> str:
             load_dotenv(docker_env_path)
             lms_api_key = os.getenv("LMS_API_KEY")
 
-    if not lms_api_key:
+    if include_auth and not lms_api_key:
         return "Error: LMS_API_KEY not set in environment"
 
     # Build URL
     url = f"{base_url}{path}"
 
     headers = {
-        "Authorization": f"Bearer {lms_api_key}",
         "Content-Type": "application/json",
     }
 
-    print(f"Calling API: {method} {url}", file=sys.stderr)
+    # Only include Authorization header if requested
+    if include_auth and lms_api_key:
+        headers["Authorization"] = f"Bearer {lms_api_key}"
+
+    print(f"Calling API: {method} {url} (auth: {include_auth})", file=sys.stderr)
 
     try:
         with httpx.Client(timeout=30.0) as client:
@@ -254,7 +260,7 @@ TOOLS = {
     "query_api": {
         "schema": {
             "name": "query_api",
-            "description": "Call the deployed backend API to fetch data or check endpoints",
+            "description": "Call the deployed backend API to fetch data or check endpoints. Use include_auth=false to test unauthenticated access.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -270,6 +276,10 @@ TOOLS = {
                     "body": {
                         "type": "string",
                         "description": "JSON request body for POST/PUT (optional)",
+                    },
+                    "include_auth": {
+                        "type": "boolean",
+                        "description": "Whether to include authentication header (default: true). Set to false to test unauthenticated access.",
                     },
                 },
                 "required": ["method", "path"],
@@ -308,7 +318,15 @@ def execute_tool(tool_name: str, args: dict) -> str:
             method = args.get("method", "GET")
             path = args.get("path", "")
             body = args.get("body")
-            return func(method, path, body)
+            # Handle both boolean and string values for include_auth
+            include_auth_raw = args.get("include_auth", True)
+            if isinstance(include_auth_raw, bool):
+                include_auth = include_auth_raw
+            elif isinstance(include_auth_raw, str):
+                include_auth = include_auth_raw.lower() != "false"
+            else:
+                include_auth = bool(include_auth_raw)
+            return func(method, path, body, include_auth)
         elif tool_name in ("read_file", "list_files"):
             path = args.get("path", "")
             return func(path)
@@ -384,22 +402,39 @@ Tool selection guidelines:
   - Test API endpoints
   - Diagnose API errors
 
+When using query_api:
+- Always specify both "method" (e.g., "GET") and "path" (e.g., "/items/") parameters
+- Common endpoints: /items/, /analytics/scores, /analytics/completion-rate
+- The path must start with /
+- Example: {"method": "GET", "path": "/items/"}
+- Use include_auth=false to test unauthenticated access (e.g., check 401 status codes)
+
 When answering questions:
 1. First understand what type of question it is:
-   - Wiki/documentation question → use list_files, then read_file
-   - Source code question → use read_file on backend/ files
-   - Live data question → use query_api
+   - Wiki/documentation question → use list_files on wiki/, then read_file on relevant files
+   - Source code question → use list_files on backend/app/, then read_file on specific files
+   - Live data question → use query_api with correct endpoint
    - Bug diagnosis → use query_api first to reproduce error, then read_file on error location
 
-2. Always cite your source:
+2. For backend structure questions:
+   - List files in backend/app/ to see the structure
+   - List files in backend/app/routers/ to find API modules
+   - Read each router file to understand its domain
+
+3. Always cite your source:
    - Wiki files: "wiki/filename.md#section"
    - Source files: "backend/path/to/file.py"
    - API data: "API endpoint /path/"
 
-3. For bug diagnosis:
+4. For bug diagnosis:
    - First reproduce the error with query_api
    - Then read the source code at the error location
    - Explain the root cause and suggest a fix
+
+5. Avoid infinite loops:
+   - Don't call list_files on the same path twice
+   - After listing files, read the relevant ones
+   - If you've made 5+ tool calls without progress, provide your best answer
 
 Be concise and helpful in your responses."""
 
@@ -474,13 +509,12 @@ def run_agentic_loop(question: str, config: dict) -> tuple:
                     }
                 )
 
-                # Append tool result to messages
+                # Append tool result to messages as user message with tool output
+                # Qwen-compatible format: use "user" role instead of "tool"
                 messages.append(
                     {
-                        "role": "tool",
-                        "name": tool_name,
-                        "content": result,
-                        "tool_call_id": tool_call.get("id", "unknown"),
+                        "role": "user",
+                        "content": f"[{tool_name} result]: {result}",
                     }
                 )
 

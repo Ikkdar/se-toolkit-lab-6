@@ -1,20 +1,56 @@
 # See wiki/caddy.md
 
 :{$CADDY_CONTAINER_PORT} {
+    # API endpoints require authentication
     handle /items* {
-        reverse_proxy http://app:{$APP_CONTAINER_PORT}
+        @authorized {
+            header Authorization *
+        }
+        @unauthorized {
+            not header Authorization *
+        }
+        respond @unauthorized 401
+        reverse_proxy @authorized http://app:{$APP_CONTAINER_PORT}
     }
     handle /learners* {
-        reverse_proxy http://app:{$APP_CONTAINER_PORT}
+        @authorized {
+            header Authorization *
+        }
+        @unauthorized {
+            not header Authorization *
+        }
+        respond @unauthorized 401
+        reverse_proxy @authorized http://app:{$APP_CONTAINER_PORT}
     }
     handle /interactions* {
-        reverse_proxy http://app:{$APP_CONTAINER_PORT}
+        @authorized {
+            header Authorization *
+        }
+        @unauthorized {
+            not header Authorization *
+        }
+        respond @unauthorized 401
+        reverse_proxy @authorized http://app:{$APP_CONTAINER_PORT}
     }
     handle /pipeline* {
-        reverse_proxy http://app:{$APP_CONTAINER_PORT}
+        @authorized {
+            header Authorization *
+        }
+        @unauthorized {
+            not header Authorization *
+        }
+        respond @unauthorized 401
+        reverse_proxy @authorized http://app:{$APP_CONTAINER_PORT}
     }
     handle /analytics* {
-        reverse_proxy http://app:{$APP_CONTAINER_PORT}
+        @authorized {
+            header Authorization *
+        }
+        @unauthorized {
+            not header Authorization *
+        }
+        respond @unauthorized 401
+        reverse_proxy @authorized http://app:{$APP_CONTAINER_PORT}
     }
     handle /docs* {
         reverse_proxy http://app:{$APP_CONTAINER_PORT}
