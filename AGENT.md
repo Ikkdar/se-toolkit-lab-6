@@ -596,3 +596,91 @@ Key fixes:
 1. Improved system prompt for tool selection
 2. Fixed LMS_API_KEY loading
 3. Added better error handling in query_api
+
+## Optional: Advanced Agent Features
+
+### Retry Logic with Exponential Backoff
+
+The agent implements automatic retry for LLM API calls with exponential backoff:
+
+**Triggers**:
+
+- 429 Too Many Requests (rate limit)
+- 5xx Server Errors
+- Network timeouts
+
+**Backoff Strategy**:
+
+- Attempt 1: Immediate
+- Attempt 2: Wait 1 second
+- Attempt 3: Wait 2 seconds
+- Attempt 4: Wait 4 seconds
+
+**Configuration**:
+
+```python
+MAX_RETRIES = 3
+BASE_BACKOFF_SECONDS = 1
+```
+
+**Benefits**:
+
+- Handles transient API failures gracefully
+- No user intervention needed for temporary errors
+- Better reliability during API hiccups
+
+### Caching Layer
+
+The agent caches tool results in memory for the duration of each agent run:
+
+**How It Works**:
+
+1. Before executing a tool, check cache for existing result
+2. Cache key = tool_name + sorted arguments (JSON)
+3. Cache hit → return cached result instantly
+4. Cache miss → execute tool, store result, return
+
+**Example**:
+
+```
+User: "Compare the items and learners routers"
+→ Agent reads backend/app/routers/items.py (cache miss)
+→ Agent reads backend/app/routers/learners.py (cache miss)
+→ Agent needs items.py again (CACHE HIT - instant!)
+```
+
+**Benefits**:
+
+- Faster responses for repeated tool calls
+- Reduced API calls (cost savings)
+- Prevents infinite loops where LLM re-reads same file
+
+**Testing**:
+
+```bash
+uv run pytest tests/test_advanced_agent.py -v
+```
+
+Tests verify:
+
+- Retry logic activates on 429/5xx errors
+- Cache stores and retrieves tool results
+- Agent shows [CACHE HIT] messages in stderr
+
+### Demo Scenarios
+
+**Demo 1: Retry Logic**
+
+```bash
+# Agent will retry on API errors
+uv run agent.py "What is FastAPI?"
+# Watch stderr for "attempt X/Y" and "Retrying in Xs" messages
+```
+
+**Demo 2: Caching**
+
+```bash
+# Ask a question requiring multiple file reads
+uv run agent.py "Compare the items and analytics routers"
+# Watch stderr for [CACHE] messages on repeated reads
+```
