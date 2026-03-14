@@ -16,11 +16,13 @@ def run_agent(question: str) -> tuple:
     """Run agent.py with a question. Returns (stdout, stderr, returncode)."""
     agent_path = get_agent_path()
 
+    # Use uv binary directly, not as Python module
     result = subprocess.run(
-        [sys.executable, "-m", "uv", "run", str(agent_path), question],
+        ["uv", "run", str(agent_path), question],
         capture_output=True,
         text=True,
         timeout=120,
+        cwd=agent_path.parent,  # Run from project root
     )
 
     return result.stdout, result.stderr, result.returncode
@@ -46,8 +48,9 @@ class TestRetryLogic:
         # Agent should either succeed or show retry attempts
         if returncode != 0:
             # If it failed, check for retry messages
-            assert "retry" in stderr.lower() or "attempt" in stderr.lower(), \
+            assert "retry" in stderr.lower() or "attempt" in stderr.lower(), (
                 "Expected retry logic to be active"
+            )
 
 
 class TestCaching:
@@ -70,8 +73,9 @@ class TestCaching:
 
         # Either cache was used, or the question was answered without needing
         # duplicate tool calls
-        assert returncode == 0 or has_cache_output, \
+        assert returncode == 0 or has_cache_output, (
             "Expected agent to use caching or succeed"
+        )
 
         if returncode == 0:
             # Verify output is valid JSON
@@ -101,7 +105,8 @@ class TestAdvancedFeatures:
         stdout, stderr, returncode = run_agent("What is in the wiki?")
 
         # Should show agentic loop progress
-        assert "agentic loop" in stderr.lower() or \
-               "iteration" in stderr.lower() or \
-               "Calling LLM" in stderr, \
-               "Expected progress messages in stderr"
+        assert (
+            "agentic loop" in stderr.lower()
+            or "iteration" in stderr.lower()
+            or "Calling LLM" in stderr
+        ), "Expected progress messages in stderr"
