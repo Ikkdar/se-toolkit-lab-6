@@ -337,13 +337,23 @@ def execute_tool(tool_name: str, args: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# LLM Communication
+# LLM Communication with Retry Logic
 # ---------------------------------------------------------------------------
 
 
-def call_llm(messages: list, config: dict, tool_schemas: list = None) -> dict:
+MAX_RETRIES = 3
+BASE_BACKOFF_SECONDS = 1
+
+
+def call_llm_with_retry(
+    messages: list, config: dict, tool_schemas: list = None
+) -> dict:
     """
-    Call the LLM API with messages and optional tool schemas.
+    Call the LLM API with exponential backoff retry logic.
+
+    Retries on:
+    - 429 Too Many Requests (rate limit)
+    - 5xx Server Errors
 
     Args:
         messages: List of message dicts (role, content)
@@ -352,6 +362,9 @@ def call_llm(messages: list, config: dict, tool_schemas: list = None) -> dict:
 
     Returns:
         Parsed LLM response dict
+
+    Raises:
+        SystemExit: If all retries fail
     """
     url = f"{config['api_base']}/chat/completions"
 
@@ -369,21 +382,124 @@ def call_llm(messages: list, config: dict, tool_schemas: list = None) -> dict:
     if tool_schemas:
         body["tools"] = tool_schemas
 
-    print(f"Calling LLM at {url}...", file=sys.stderr)
+    for attempt in range(MAX_RETRIES + 1):
+        print(
+            f"Calling LLM at {url}... (attempt {attempt + 1}/{MAX_RETRIES + 1})",
+            file=sys.stderr,
+        )
 
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(url, headers=headers, json=body)
-            response.raise_for_status()
-            return response.json()
-    except httpx.HTTPError as e:
-        print(f"HTTP error: {e}", file=sys.stderr)
-        sys.exit(1)
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                response = client.post(url, headers=headers, json=body)
+
+                # Check for rate limit or server error
+                if response.status_code == 429:
+                    if attempt < MAX_RETRIES:
+                        backoff = BASE_BACKOFF_SECONDS * (2**attempt)
+                        print(
+                            f"Rate limit hit (429). Retrying in {backoff}s...",
+                            file=sys.stderr,
+                        )
+                        import time
+
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        print("Max retries exceeded for rate limit", file=sys.stderr)
+                        sys.exit(1)
+
+                elif response.status_code >= 500:
+                    if attempt < MAX_RETRIES:
+                        backoff = BASE_BACKOFF_SECONDS * (2**attempt)
+                        print(
+                            f"Server error ({response.status_code}). Retrying in {backoff}s...",
+                            file=sys.stderr,
+                        )
+                        import time
+
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        print(f"Max retries exceeded for server error", file=sys.stderr)
+                        sys.exit(1)
+
+                # Success or client error (4xx)
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPError as e:
+            if attempt < MAX_RETRIES:
+                backoff = BASE_BACKOFF_SECONDS * (2**attempt)
+                print(f"HTTP error: {e}. Retrying in {backoff}s...", file=sys.stderr)
+                import time
+
+                time.sleep(backoff)
+            else:
+                print(f"HTTP error: {e}", file=sys.stderr)
+                sys.exit(1)
+
+    # Should not reach here, but just in case
+    print("Unexpected error in LLM call", file=sys.stderr)
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
-# Agentic Loop
+# Agentic Loop with Caching
 # ---------------------------------------------------------------------------
+
+
+class ToolCache:
+    """In-memory cache for tool results."""
+
+    def __init__(self):
+        self._cache = {}
+
+    def _make_key(self, tool_name: str, args: dict) -> str:
+        """Create a cache key from tool name and arguments."""
+        import json
+
+        # Sort args for consistent keys
+        args_str = json.dumps(args, sort_keys=True)
+        return f"{tool_name}:{args_str}"
+
+    def get(self, tool_name: str, args: dict) -> str | None:
+        """Get cached result if exists."""
+        key = self._make_key(tool_name, args)
+        return self._cache.get(key)
+
+    def set(self, tool_name: str, args: dict, result: str) -> None:
+        """Cache a tool result."""
+        key = self._make_key(tool_name, args)
+        self._cache[key] = result
+        print(f"  [CACHE] Stored result for {tool_name}", file=sys.stderr)
+
+    def clear(self) -> None:
+        """Clear the cache."""
+        self._cache.clear()
+
+
+def execute_tool_cached(tool_name: str, args: dict, cache: ToolCache) -> str:
+    """
+    Execute a tool with caching.
+
+    Args:
+        tool_name: Name of the tool
+        args: Tool arguments
+        cache: ToolCache instance
+
+    Returns:
+        Tool result (from cache or fresh)
+    """
+    # Check cache first
+    cached_result = cache.get(tool_name, args)
+    if cached_result is not None:
+        print(f"  [CACHE HIT] {tool_name} with args {args}", file=sys.stderr)
+        return cached_result
+
+    # Execute tool and cache result
+    result = execute_tool(tool_name, args)
+    cache.set(tool_name, args, result)
+    return result
 
 
 SYSTEM_PROMPT = """You are a documentation and system assistant for a software engineering lab.
@@ -464,13 +580,16 @@ def run_agentic_loop(question: str, config: dict) -> tuple:
     answer = ""
     source = ""
 
+    # Initialize cache for this agent run
+    cache = ToolCache()
+
     print(f"Starting agentic loop for question: {question}", file=sys.stderr)
 
     for iteration in range(MAX_ITERATIONS):
         print(f"\n--- Iteration {iteration + 1}/{MAX_ITERATIONS} ---", file=sys.stderr)
 
-        # Call LLM
-        response = call_llm(messages, config, tool_schemas)
+        # Call LLM with retry logic
+        response = call_llm_with_retry(messages, config, tool_schemas)
 
         # Parse response
         choice = response["choices"][0]
@@ -497,8 +616,8 @@ def run_agentic_loop(question: str, config: dict) -> tuple:
                     f"  Executing tool: {tool_name} with args: {args}", file=sys.stderr
                 )
 
-                # Execute tool
-                result = execute_tool(tool_name, args)
+                # Execute tool with caching
+                result = execute_tool_cached(tool_name, args, cache)
 
                 # Record tool call
                 tool_calls_list.append(
