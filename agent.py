@@ -146,6 +146,75 @@ def list_files(path: str) -> str:
         return f"Error listing directory: {e}"
 
 
+def query_api(method: str, path: str, body: str = None) -> str:
+    """
+    Call the deployed backend API.
+
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: API endpoint path (e.g., '/items/')
+        body: JSON request body for POST/PUT (optional)
+
+    Returns:
+        JSON string with status_code and body, or error message
+    """
+    # Read configuration from environment
+    base_url = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+    lms_api_key = os.getenv("LMS_API_KEY")
+
+    if not lms_api_key:
+        # Try to load from .env.docker.secret
+        docker_env_path = Path(__file__).parent / ".env.docker.secret"
+        if docker_env_path.exists():
+            load_dotenv(docker_env_path)
+            lms_api_key = os.getenv("LMS_API_KEY")
+
+    if not lms_api_key:
+        return "Error: LMS_API_KEY not set in environment"
+
+    # Build URL
+    url = f"{base_url}{path}"
+
+    headers = {
+        "Authorization": f"Bearer {lms_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    print(f"Calling API: {method} {url}", file=sys.stderr)
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                json_body = json.loads(body) if body else None
+                response = client.post(url, headers=headers, json=json_body)
+            elif method.upper() == "PUT":
+                json_body = json.loads(body) if body else None
+                response = client.put(url, headers=headers, json=json_body)
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
+            elif method.upper() == "PATCH":
+                json_body = json.loads(body) if body else None
+                response = client.patch(url, headers=headers, json=json_body)
+            else:
+                return f"Error: Unsupported method: {method}"
+
+            # Return JSON string with status_code and body
+            result = {
+                "status_code": response.status_code,
+                "body": response.text,
+            }
+            return json.dumps(result)
+
+    except httpx.HTTPError as e:
+        return f"Error: HTTP request failed: {e}"
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON body: {e}"
+    except Exception as e:
+        return f"Error: API call failed: {e}"
+
+
 # Tool registry
 TOOLS = {
     "read_file": {
@@ -182,6 +251,32 @@ TOOLS = {
         },
         "function": list_files,
     },
+    "query_api": {
+        "schema": {
+            "name": "query_api",
+            "description": "Call the deployed backend API to fetch data or check endpoints",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)",
+                        "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"],
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API endpoint path (e.g., '/items/', '/analytics/scores')",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "JSON request body for POST/PUT (optional)",
+                    },
+                },
+                "required": ["method", "path"],
+            },
+        },
+        "function": query_api,
+    },
 }
 
 
@@ -208,9 +303,17 @@ def execute_tool(tool_name: str, args: dict) -> str:
     func = tool["function"]
 
     try:
-        # Extract arguments
-        path = args.get("path", "")
-        return func(path)
+        # Execute based on tool type
+        if tool_name == "query_api":
+            method = args.get("method", "GET")
+            path = args.get("path", "")
+            body = args.get("body")
+            return func(method, path, body)
+        elif tool_name in ("read_file", "list_files"):
+            path = args.get("path", "")
+            return func(path)
+        else:
+            return f"Error: Unknown tool type: {tool_name}"
     except Exception as e:
         return f"Error executing tool: {e}"
 
@@ -265,19 +368,38 @@ def call_llm(messages: list, config: dict, tool_schemas: list = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-SYSTEM_PROMPT = """You are a documentation assistant for a software engineering lab.
+SYSTEM_PROMPT = """You are a documentation and system assistant for a software engineering lab.
 
-You have access to two tools:
+You have access to three tools:
 1. list_files - List files and directories at a given path
 2. read_file - Read the contents of a file
+3. query_api - Call the deployed backend API to fetch data or check endpoints
 
-When answering questions about the project:
-1. First use list_files to discover relevant wiki files (start with "wiki" directory)
-2. Then use read_file to read specific files and find the answer
-3. Always cite your source as "wiki/filename.md#section-anchor" where section-anchor is the relevant section
-4. Only give your final answer after gathering enough information from the files
+Tool selection guidelines:
+- Use list_files to discover project structure (e.g., list files in wiki/ or backend/)
+- Use read_file to read documentation (wiki/), source code (backend/), or config files (docker-compose.yml, etc.)
+- Use query_api to:
+  - Get live data from the database (item counts, scores, analytics)
+  - Check HTTP status codes
+  - Test API endpoints
+  - Diagnose API errors
 
-If the question is not about project documentation, answer directly without using tools.
+When answering questions:
+1. First understand what type of question it is:
+   - Wiki/documentation question → use list_files, then read_file
+   - Source code question → use read_file on backend/ files
+   - Live data question → use query_api
+   - Bug diagnosis → use query_api first to reproduce error, then read_file on error location
+
+2. Always cite your source:
+   - Wiki files: "wiki/filename.md#section"
+   - Source files: "backend/path/to/file.py"
+   - API data: "API endpoint /path/"
+
+3. For bug diagnosis:
+   - First reproduce the error with query_api
+   - Then read the source code at the error location
+   - Explain the root cause and suggest a fix
 
 Be concise and helpful in your responses."""
 
